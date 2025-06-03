@@ -3,23 +3,23 @@ package fraudscan.main.controller;
 import java.text.NumberFormat;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Locale;
-import java.util.Random;
+import java.util.*;
+
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import org.springframework.stereotype.Component;
 
+import fraudscan.main.client.AIClient;
+import fraudscan.main.dto.TransactionRequestDto;
 import fraudscan.main.model.Transaction;
+import fraudscan.main.repository.TransactionRepository;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.collections.FXCollections;
 import javafx.fxml.FXML;
-import javafx.scene.control.Button;
-import javafx.scene.control.Label;
-import javafx.scene.control.TableColumn;
-import javafx.scene.control.TableView;
+import javafx.scene.control.*;
 
 @Component
 public class MainViewController {
@@ -29,6 +29,7 @@ public class MainViewController {
     @FXML private Label lblFraudTransactionsTitle;
 
     @FXML private Button btnStartSimulation;
+    @FXML private Button btnDatabaseDelete;
 
     @FXML private TableView<Transaction> transactionTable;
     @FXML private TableColumn<Transaction, String> colFrom;
@@ -42,53 +43,90 @@ public class MainViewController {
     private boolean simulationRunning = false;
     private ScheduledExecutorService executor;
 
+    private String lastUsedFromAccount = null;
+    private int repeatFromAccountCount = 0;
+
+    private final TransactionRepository transactionRepository;
+    private final AIClient aiClient;
+
+    private final Set<String> suspiciousAccounts = new HashSet<>();
+
+    public MainViewController(TransactionRepository transactionRepository, AIClient aiClient) {
+        this.transactionRepository = transactionRepository;
+        this.aiClient = aiClient;
+    }
+
     @FXML
     public void initialize() {
-        // --- Cellákhoz oszlop-hozzárendelés ---
-        colFrom.setCellValueFactory(data ->
-            new SimpleStringProperty(data.getValue().getFromAccount()));
-        colTo.setCellValueFactory(data ->
-            new SimpleStringProperty(data.getValue().getToAccount()));
-        colDate.setCellValueFactory(data ->
-            new SimpleStringProperty(
+        colFrom.setCellValueFactory(data -> new SimpleStringProperty(data.getValue().getFromAccount()));
+        colTo.setCellValueFactory(data -> new SimpleStringProperty(data.getValue().getToAccount()));
+        colDate.setCellValueFactory(data -> new SimpleStringProperty(
                 data.getValue().getTimestamp().format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm"))));
         colAmount.setCellValueFactory(data -> {
-            double rawAmount = data.getValue().getAmount();
-            NumberFormat nf = NumberFormat.getNumberInstance(new Locale("hu", "HU"));
-            nf.setMinimumFractionDigits(2);
-            nf.setMaximumFractionDigits(2);
-            String formatted = nf.format(rawAmount); // pl. 4 784,00
+            int rawAmount = (int) data.getValue().getAmount();
+            NumberFormat nf = NumberFormat.getIntegerInstance(new Locale("hu", "HU"));
+            String formatted = nf.format(rawAmount) + " Ft";
             return new SimpleStringProperty(formatted);
         });
 
-        // --- Igazítások ---
-        colFrom.setStyle("-fx-alignment: CENTER-LEFT;");
-        colTo.setStyle("-fx-alignment: CENTER-LEFT;");
+        colFrom.setStyle("-fx-alignment: CENTER;");
+        colTo.setStyle("-fx-alignment: CENTER;");
         colDate.setStyle("-fx-alignment: CENTER;");
-        colAmount.setStyle("-fx-alignment: CENTER-RIGHT;");
+        colAmount.setStyle("-fx-alignment: CENTER;");
 
-        // --- Kezdő állapot ---
         transactionTable.setItems(FXCollections.observableArrayList());
         fraudTables.setItems(FXCollections.observableArrayList());
 
         btnStartSimulation.setOnAction(e -> toggleSimulation());
+
+        transactionTable.setOnMouseClicked(event -> {
+            if (event.getClickCount() == 2 && transactionTable.getSelectionModel().getSelectedItem() != null) {
+                Transaction selected = transactionTable.getSelectionModel().getSelectedItem();
+                showTransactionDetails(selected);
+            }
+        });
     }
 
     private Transaction generateRandomTransaction() {
         Random rand = new Random();
 
-        String fromAcc = String.valueOf(300000000 + rand.nextInt(999999999));
-        String toAcc = String.valueOf(200000000 + rand.nextInt(999999999));
+        String fromAcc;
+        if (repeatFromAccountCount > 0 && lastUsedFromAccount != null) {
+            fromAcc = lastUsedFromAccount;
+            repeatFromAccountCount--;
+        } else {
+            fromAcc = String.format("%08d", rand.nextInt(100_000_000));
+            lastUsedFromAccount = fromAcc;
 
-        double amount = 1000 + rand.nextDouble() * 15000;
-        amount = Math.round(amount * 100.0) / 100.0;
+            if (rand.nextInt(100) < 5) {
+                repeatFromAccountCount = 2 + rand.nextInt(3);
+            }
+        }
+
+        String toAcc = String.format("%08d", rand.nextInt(100_000_000));
+
+        int chance = rand.nextInt(100);
+        int amount;
+
+        if (chance < 50) {
+            amount = 100_000 + rand.nextInt(100_001);
+        } else if (chance < 70) {
+            amount = 10_000 + rand.nextInt(90_000);
+        } else if (chance < 80) {
+            amount = 200_001 + rand.nextInt(100_000);
+        } else if (chance < 90) {
+            amount = 300_001 + rand.nextInt(100_000);
+        } else if (chance < 95) {
+            amount = 400_001 + rand.nextInt(100_000);
+        } else {
+            amount = 1_000_001 + rand.nextInt(999_000_000);
+        }
 
         LocalDateTime time = LocalDateTime.now().withSecond(0).withNano(0);
         String[] locations = {"HU", "DE", "SK", "RO", "PL"};
         String location = locations[rand.nextInt(locations.length)];
-        boolean isFraud = rand.nextInt(10) == 0;
 
-        return new Transaction(fromAcc, toAcc, amount, time, location, isFraud);
+        return new Transaction(fromAcc, toAcc, amount, time, location, false);
     }
 
     private void toggleSimulation() {
@@ -109,7 +147,28 @@ public class MainViewController {
                     Platform.runLater(() -> {
                         int transactionsNow = new Random().nextInt(3) + 1;
                         for (int i = 0; i < transactionsNow; i++) {
-                            transactionTable.getItems().add(generateRandomTransaction());
+                            Transaction t = generateRandomTransaction();
+
+                            // DTO küldés
+                            TransactionRequestDto dto = new TransactionRequestDto(
+                                t.getTimestamp().toString(),
+                                t.getFromAccount(),
+                                t.getToAccount(),
+                                (int) t.getAmount(),
+                                t.getLocation()
+                            );
+
+                            boolean isFraud = aiClient.isFraudulent(dto);
+                            t.setPredictedFraud(isFraud);
+
+                            transactionTable.getItems().add(t);
+                            transactionRepository.save(t);
+
+                            if (isFraud) {
+                                if (!fraudTables.getItems().contains(t.getFromAccount())) {
+                                    fraudTables.getItems().add(t.getFromAccount());
+                                }
+                            }
                         }
                     });
 
@@ -121,4 +180,44 @@ public class MainViewController {
             executor.schedule(task, 0, TimeUnit.MILLISECONDS);
         }
     }
+
+    private void showTransactionDetails(Transaction transaction) {
+        StringBuilder details = new StringBuilder();
+        details.append("📋 Tranzakció részletei:\n\n");
+        details.append("➡ Feladó fiók: ").append(transaction.getFromAccount()).append("\n");
+        details.append("⬅ Címzett fiók: ").append(transaction.getToAccount()).append("\n");
+        details.append("💰 Összeg: ").append(transaction.getAmount()).append(" Ft\n");
+        details.append("🕒 Időpont: ").append(
+                transaction.getTimestamp().format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm"))
+        ).append("\n");
+        details.append("🌍 Helyszín: ").append(transaction.getLocation()).append("\n");
+        details.append("🚨 Gyanús: ").append(transaction.isPredictedFraud() ? "Igen" : "Nem");
+
+        Label contentLabel = new Label(details.toString());
+        contentLabel.setStyle("-fx-font-size: 16px; -fx-font-family: 'Segoe UI';");
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("Tranzakció részletei");
+        alert.setHeaderText("Kiválasztott utalás");
+        alert.getDialogPane().setContent(contentLabel);
+        alert.showAndWait();
+    }
+
+    public void clearDatabase() {
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Adatbázis Törlés");
+        confirm.setHeaderText("Biztosan törlöd az összes tranzakciót?");
+        confirm.setContentText("Ez a művelet nem visszavonható!");
+
+        Optional<ButtonType> result = confirm.showAndWait();
+        if (result.isPresent() && result.get() == ButtonType.OK) {
+            transactionRepository.deleteAll();
+            transactionTable.getItems().clear();
+            fraudTables.getItems().clear();
+            suspiciousAccounts.clear();
+            System.out.println("✅ Adatbázis és UI kiürítve.");
+        }
+    }
 }
+
+

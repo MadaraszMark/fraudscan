@@ -46,6 +46,7 @@
                   <HBox.margin>
                      <Insets />
                   </HBox.margin></Label>
+               <Button fx:id="btnDatabaseDelete" minWidth="-Infinity" mnemonicParsing="false" onMouseClicked="#clearDatabase" prefHeight="36.0" prefWidth="160.0" text="Adatbázis Törlése" />
                 </HBox>
 
                 <!-- Gyanús fiókok tábla -->
