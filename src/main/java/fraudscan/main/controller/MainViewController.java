@@ -76,6 +76,8 @@ public class MainViewController {
 
         transactionTable.setItems(FXCollections.observableArrayList());
         fraudTables.setItems(FXCollections.observableArrayList());
+        colFraudAccounts.setCellValueFactory(data -> new SimpleStringProperty(data.getValue()));
+        colFraudAccounts.setStyle("-fx-alignment: CENTER;");
 
         btnStartSimulation.setOnAction(e -> toggleSimulation());
 
@@ -165,8 +167,10 @@ public class MainViewController {
                             transactionRepository.save(t);
 
                             if (isFraud) {
-                                if (!fraudTables.getItems().contains(t.getFromAccount())) {
-                                    fraudTables.getItems().add(t.getFromAccount());
+                                String fromAcc = t.getFromAccount();
+                                if (!suspiciousAccounts.contains(fromAcc)) {
+                                    suspiciousAccounts.add(fromAcc);
+                                    fraudTables.getItems().add(fromAcc);
                                 }
                             }
                         }
